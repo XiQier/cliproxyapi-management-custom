@@ -54,6 +54,13 @@
   gap: $spacing-sm;
 }
 
+.emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: $spacing-sm;
+}
+
 .summaryGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -95,6 +102,10 @@
 
 .summaryCardExpired {
   --summary-accent: #bf5c48;
+}
+
+.summaryCardQuota {
+  --summary-accent: #3f7dc0;
 }
 
 .summaryIcon {
@@ -281,7 +292,7 @@
 
 .detailsGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: $spacing-sm;
 
   @include mobile {
@@ -456,6 +467,20 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: $spacing-md;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.quotaGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: $spacing-md;
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 
   @include mobile {
     grid-template-columns: 1fr;

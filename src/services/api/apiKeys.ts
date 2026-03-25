@@ -35,8 +35,11 @@ export interface ManagedApiKeyQuota {
   pricing?: ManagedApiKeyPricing;
 }
 
+export type ApiKeyExportScope = 'pending' | 'all';
+
 export interface ManagedApiKeyEntry {
   apiKey: string;
+  maxConcurrency?: number;
   quota?: ManagedApiKeyQuota;
   durationDays?: number;
   activatedAt?: string;
@@ -53,10 +56,40 @@ export interface ManagedApiKeyEntry {
 
 export interface ApiKeyMutationEntry {
   apiKey: string;
+  maxConcurrency?: number;
   quota?: ManagedApiKeyQuota;
   durationDays?: number;
   activatedAt?: string;
   expiresAt?: string;
+}
+
+export interface ApiKeyBatchGenerateRequest {
+  count: number;
+  exportPrefix?: string;
+  displayPrefix?: string;
+  prefix?: string;
+  maxConcurrency?: number;
+  durationDays?: number;
+  quota?: ManagedApiKeyQuota;
+}
+
+export interface ApiKeyBatchGenerateResponse {
+  count: number;
+  apiKeys: string[];
+  apiKeyEntries: ManagedApiKeyEntry[];
+  exportTxt: string;
+}
+
+export interface ApiKeyBatchCreateResultItem {
+  entry: ApiKeyMutationEntry;
+  success: boolean;
+  error?: string;
+}
+
+export interface ApiKeyBatchCreateResult {
+  items: ApiKeyBatchCreateResultItem[];
+  successCount: number;
+  failedCount: number;
 }
 
 const EMPTY_USAGE: ManagedApiKeyUsage = {
@@ -99,6 +132,12 @@ const readBoolean = (value: unknown, fallback = false): boolean => {
     if (normalized === 'false') return false;
   }
   return fallback;
+};
+
+const getBatchCreateErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'Unknown error';
 };
 
 const normalizePricingModel = (raw: unknown): ManagedApiKeyPricingModel | null => {
@@ -215,6 +254,10 @@ const normalizeEntry = (raw: unknown): ManagedApiKeyEntry | null => {
 
   return {
     apiKey,
+    maxConcurrency: (() => {
+      const value = readNumber(pickValue(record, ['max-concurrency', 'maxConcurrency']));
+      return value !== undefined && value > 0 ? Math.trunc(value) : undefined;
+    })(),
     quota: normalizeQuota(pickValue(record, ['quota'])),
     durationDays:
       durationDays !== undefined && durationDays > 0 ? Math.trunc(durationDays) : undefined,
@@ -231,9 +274,7 @@ const normalizeEntry = (raw: unknown): ManagedApiKeyEntry | null => {
       pickValue(record, ['pricing-configured', 'pricingConfigured']),
       false
     ),
-    remainingRequests: readNumber(
-      pickValue(record, ['remaining-requests', 'remainingRequests'])
-    ),
+    remainingRequests: readNumber(pickValue(record, ['remaining-requests', 'remainingRequests'])),
     remainingTokens: readNumber(pickValue(record, ['remaining-tokens', 'remainingTokens'])),
     remainingUsd: readNumber(pickValue(record, ['remaining-usd', 'remainingUsd'])),
   };
@@ -259,56 +300,6 @@ const normalizeEntriesFromResponse = (raw: unknown): ManagedApiKeyEntry[] => {
     .filter((item): item is ManagedApiKeyEntry => item !== null);
 };
 
-const serializePricingModel = (model: ManagedApiKeyPricingModel): ApiRecord | null => {
-  const match = model.match.trim();
-  if (!match) return null;
-
-  const serialized: ApiRecord = { match };
-
-  if (model.inputUsdPerMillion !== undefined && model.inputUsdPerMillion >= 0) {
-    serialized['input-usd-per-million'] = model.inputUsdPerMillion;
-  }
-  if (model.outputUsdPerMillion !== undefined && model.outputUsdPerMillion >= 0) {
-    serialized['output-usd-per-million'] = model.outputUsdPerMillion;
-  }
-  if (model.cachedUsdPerMillion !== undefined && model.cachedUsdPerMillion >= 0) {
-    serialized['cached-usd-per-million'] = model.cachedUsdPerMillion;
-  }
-  if (model.reasoningUsdPerMillion !== undefined && model.reasoningUsdPerMillion >= 0) {
-    serialized['reasoning-usd-per-million'] = model.reasoningUsdPerMillion;
-  }
-
-  return Object.keys(serialized).length > 1 ? serialized : null;
-};
-
-const serializePricing = (pricing?: ManagedApiKeyPricing): ApiRecord | undefined => {
-  if (!pricing) return undefined;
-
-  const serialized: ApiRecord = {};
-  if (pricing.inputUsdPerMillion !== undefined && pricing.inputUsdPerMillion >= 0) {
-    serialized['input-usd-per-million'] = pricing.inputUsdPerMillion;
-  }
-  if (pricing.outputUsdPerMillion !== undefined && pricing.outputUsdPerMillion >= 0) {
-    serialized['output-usd-per-million'] = pricing.outputUsdPerMillion;
-  }
-  if (pricing.cachedUsdPerMillion !== undefined && pricing.cachedUsdPerMillion >= 0) {
-    serialized['cached-usd-per-million'] = pricing.cachedUsdPerMillion;
-  }
-  if (pricing.reasoningUsdPerMillion !== undefined && pricing.reasoningUsdPerMillion >= 0) {
-    serialized['reasoning-usd-per-million'] = pricing.reasoningUsdPerMillion;
-  }
-
-  const serializedModels =
-    pricing.models
-      ?.map((model) => serializePricingModel(model))
-      .filter((model): model is ApiRecord => model !== null) ?? [];
-  if (serializedModels.length) {
-    serialized.models = serializedModels;
-  }
-
-  return Object.keys(serialized).length ? serialized : undefined;
-};
-
 const serializeQuota = (quota?: ManagedApiKeyQuota): ApiRecord | undefined => {
   if (!quota) return undefined;
 
@@ -323,11 +314,6 @@ const serializeQuota = (quota?: ManagedApiKeyQuota): ApiRecord | undefined => {
     serialized['max-usd'] = quota.maxUsd;
   }
 
-  const pricing = serializePricing(quota.pricing);
-  if (pricing) {
-    serialized.pricing = pricing;
-  }
-
   return Object.keys(serialized).length ? serialized : undefined;
 };
 
@@ -336,6 +322,10 @@ const serializeApiKeyEntry = (entry: ApiKeyMutationEntry): ApiRecord => {
   const serialized: ApiRecord = {
     'api-key': apiKey,
   };
+
+  if ((entry.maxConcurrency ?? 0) > 0) {
+    serialized['max-concurrency'] = Math.trunc(entry.maxConcurrency ?? 0);
+  }
 
   if ((entry.durationDays ?? 0) > 0) {
     serialized['duration-days'] = Math.trunc(entry.durationDays ?? 0);
@@ -352,6 +342,24 @@ const serializeApiKeyEntry = (entry: ApiKeyMutationEntry): ApiRecord => {
   }
 
   return serialized;
+};
+
+const normalizeBatchGenerateResponse = (raw: unknown): ApiKeyBatchGenerateResponse => {
+  const record = isRecord(raw) ? raw : {};
+  const apiKeysRaw = pickValue(record, ['api-keys', 'apiKeys']);
+  const apiKeys = Array.isArray(apiKeysRaw)
+    ? apiKeysRaw.map((item) => readString(item)).filter(Boolean)
+    : [];
+  const apiKeyEntries = normalizeEntriesFromResponse(record);
+
+  const normalizedCount = readNumber(pickValue(record, ['count']));
+
+  return {
+    count: normalizedCount ?? (apiKeyEntries.length || apiKeys.length),
+    apiKeys: apiKeys.length ? apiKeys : apiKeyEntries.map((entry) => entry.apiKey),
+    apiKeyEntries,
+    exportTxt: readString(pickValue(record, ['export-txt', 'exportTxt'])),
+  };
 };
 
 export const apiKeysApi = {
@@ -381,10 +389,128 @@ export const apiKeysApi = {
   create: (entry: ApiKeyMutationEntry) =>
     apiClient.patch('/api-keys', { value: serializeApiKeyEntry(entry) }),
 
+  async batchGenerate(request: ApiKeyBatchGenerateRequest): Promise<ApiKeyBatchGenerateResponse> {
+    const payload: ApiRecord = {
+      count: Math.trunc(request.count),
+    };
+
+    const exportPrefix = request.exportPrefix?.trim();
+    const displayPrefix = request.displayPrefix?.trim();
+    const prefix = request.prefix?.trim();
+    if (exportPrefix) {
+      payload['export-prefix'] = exportPrefix;
+    }
+    if (displayPrefix) {
+      payload['display-prefix'] = displayPrefix;
+    }
+    if (prefix) {
+      payload.prefix = prefix;
+    }
+    if (request.maxConcurrency !== undefined && request.maxConcurrency >= 0) {
+      payload['max-concurrency'] = Math.trunc(request.maxConcurrency);
+    }
+    if (request.durationDays !== undefined && request.durationDays > 0) {
+      payload['duration-days'] = Math.trunc(request.durationDays);
+    }
+
+    const quota = serializeQuota(request.quota);
+    if (quota) {
+      payload.quota = quota;
+    }
+
+    const data = await apiClient.post<Record<string, unknown>>('/api-keys/batch-generate', payload);
+    return normalizeBatchGenerateResponse(data);
+  },
+
+  async createBatch(
+    entries: ApiKeyMutationEntry[],
+    concurrency = 5
+  ): Promise<ApiKeyBatchCreateResult> {
+    if (entries.length === 0) {
+      return {
+        items: [],
+        successCount: 0,
+        failedCount: 0,
+      };
+    }
+
+    const normalizedConcurrency = Math.min(
+      Math.max(1, Math.trunc(concurrency) || 1),
+      entries.length
+    );
+    const results: ApiKeyBatchCreateResultItem[] = new Array(entries.length);
+    let nextIndex = 0;
+
+    const worker = async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= entries.length) return;
+
+        const entry = entries[currentIndex];
+        try {
+          await apiKeysApi.create(entry);
+          results[currentIndex] = {
+            entry,
+            success: true,
+          };
+        } catch (error) {
+          results[currentIndex] = {
+            entry,
+            success: false,
+            error: getBatchCreateErrorMessage(error),
+          };
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: normalizedConcurrency }, () => worker()));
+
+    const successCount = results.filter((result) => result?.success).length;
+    return {
+      items: results,
+      successCount,
+      failedCount: results.length - successCount,
+    };
+  },
+
   update: (index: number, value: string | ApiKeyMutationEntry) =>
     typeof value === 'string'
       ? apiClient.patch('/api-keys', { index, value })
       : apiClient.patch('/api-keys', { index, value: serializeApiKeyEntry(value) }),
+
+  async exportTXT(options?: { exportPrefix?: string; scope?: ApiKeyExportScope }): Promise<string> {
+    const params: Record<string, string | boolean> = {};
+    if (options?.exportPrefix?.trim()) {
+      params['export-prefix'] = options.exportPrefix.trim();
+    }
+    if (options?.scope) {
+      params.scope = options.scope;
+      if (options.scope === 'pending') {
+        params['only-pending'] = true;
+      }
+    }
+
+    const response = await apiClient.getRaw('/api-keys/export', {
+      params: Object.keys(params).length > 0 ? params : undefined,
+      responseType: 'blob',
+      headers: {
+        Accept: 'text/plain;charset=utf-8, text/plain',
+      },
+    });
+
+    const data: unknown = response.data;
+    if (data instanceof Blob) {
+      return data.text();
+    }
+    if (typeof data === 'string') {
+      return data;
+    }
+    if (data === undefined || data === null) {
+      return '';
+    }
+    return String(data);
+  },
 
   delete: (index: number) => apiClient.delete(`/api-keys?index=${index}`),
 
